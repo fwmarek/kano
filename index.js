@@ -11,7 +11,7 @@ const {
 } = require('discord.js');
 require('dotenv').config();
 
-// Reorder options (required ones first)
+// Reorder command options so required ones come first
 function reorderOptions(options) {
   if (!Array.isArray(options)) return options;
   options.forEach((opt) => {
@@ -20,7 +20,7 @@ function reorderOptions(options) {
   return options.sort((a, b) => (a.required === b.required ? 0 : a.required ? -1 : 1));
 }
 
-// Deploy slash commands
+// Deploy all slash commands
 async function deployCommands() {
   const commands = [];
   const commandsPath = path.join(__dirname, 'commands');
@@ -62,7 +62,7 @@ const client = new Client({
 
 client.commands = new Collection();
 
-// Load commands
+// Load all command files into client.commands
 const commandsDir = path.join(__dirname, 'commands');
 fs.readdirSync(commandsDir)
   .filter((file) => file.endsWith('.js'))
@@ -81,27 +81,25 @@ client.once(Events.ClientReady, () => {
 
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // Slash commands
     if (interaction.isChatInputCommand()) {
       const command = client.commands.get(interaction.commandName);
       if (command) await command.execute(interaction);
-    }
-    // Buttons
-    else if (interaction.isButton()) {
+    } else if (interaction.isButton()) {
       const { customId } = interaction;
 
+      // Button logic for /case-status
       if (customId.startsWith('void-toggle-')) {
         const cmd = client.commands.get('case-status');
         if (cmd?.handleButton) await cmd.handleButton(interaction);
         return;
       }
 
+      // Button logic for /ssuvote
       if (customId === 'vote-yes' || customId === 'view-voters') {
         const cmd = client.commands.get('ssuvote');
         if (cmd?.handleButton) await cmd.handleButton(interaction);
         return;
       }
-
     }
   } catch (err) {
     console.error('❌ Interaction Error:', err);
@@ -118,7 +116,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// Start bot
+// Initialize bot
 (async () => {
   await deployCommands();
   if (!process.env.TOKEN) {
@@ -127,3 +125,4 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
   await client.login(process.env.TOKEN);
 })();
+
