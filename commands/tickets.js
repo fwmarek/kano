@@ -1,141 +1,176 @@
-// Full Ticket System in One File
-require("dotenv").config();
 const {
-  Client,
-  GatewayIntentBits,
-  Partials,
-  Collection,
   SlashCommandBuilder,
-  PermissionFlagsBits,
+  ChannelType,
+  PermissionsBitField,
   EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ChannelType,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } = require("discord.js");
 const fs = require("fs");
+const archiver = require("archiver");
+const path = require("path");
 
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-  ],
-  partials: [Partials.Message, Partials.Channel],
-});
+module.exports = {
+  data: new SlashCommandBuilder()
+    .setName("ticket")
+    .setDescription("Support ticket module (admin only)"),
 
-client.commands = new Collection();
+  async execute(interaction) {
+    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+      return interaction.reply({
+        content: "❌ You must be an admin to use this command.",
+        ephemeral: true,
+      });
+    }
 
-const ticketsCommand = new SlashCommandBuilder()
-  .setName("tickets")
-  .setDescription("Admin-only command to initiate the support ticket system.")
-  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
-client.commands.set("tickets", { data: ticketsCommand, execute: executeTickets });
+    const openBtn = new ButtonBuilder()
+      .setCustomId("open_ticket")
+      .setLabel("Open a Ticket")
+      .setStyle(ButtonStyle.Primary);
 
-client.once("ready", () => {
-  console.log(`Logged in as ${client.user.tag}`);
-});
+    const row = new ActionRowBuilder().addComponents(openBtn);
 
-client.on("interactionCreate", async (interaction) => {
-  if (interaction.isChatInputCommand()) {
-    const command = client.commands.get(interaction.commandName);
-    if (command) await command.execute(interaction);
-  }
+    await interaction.reply({
+      content: "Click below to open a support ticket.",
+      components: [row],
+      ephemeral: false,
+    });
+  },
 
-  if (interaction.isButton()) {
-    const { customId, guild, user } = interaction;
+  async handleComponent(interaction, client) {
+    if (interaction.customId === "open_ticket") {
+      const modal = new ModalBuilder()
+        .setTitle("Ticket Reason")
+        .setCustomId("ticket_modal")
+        .addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId("reason_input")
+              .setLabel("Why are you opening this ticket?")
+              .setStyle(TextInputStyle.Paragraph)
+              .setRequired(true)
+          )
+        );
 
-    if (customId === "contact_support") {
-      await interaction.reply({ content: "Creating ticket channel...", ephemeral: true });
+      return await interaction.showModal(modal);
+    }
 
-      const category = guild.channels.cache.get("1378240944658448394");
-      const supportRoleId = "1376678488068849744";
-      const modRoles = ["1376678488068849744", "1376678427289063475", "1376681097626390608"];
+    if (interaction.customId === "claim_ticket") {
+      return await interaction.reply({
+        content: `✅ ${interaction.user} has claimed this ticket!`,
+        ephemeral: true,
+      });
+    }
 
-      const ticketChannel = await guild.channels.create({
-        name: `ticket-${user.username}`,
-        type: ChannelType.GuildText,
-        parent: category.id,
-        permissionOverwrites: [
-          { id: guild.id, deny: ["ViewChannel"] },
-          { id: user.id, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory"] },
-          ...modRoles.map((id) => ({ id, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory"] })),
-        ],
+    if (interaction.customId === "close_ticket") {
+      await interaction.reply({
+        content: `🛑 ${interaction.user} is closing this ticket. Channel will be deleted in 10 seconds.`,
+        ephemeral: false,
       });
 
-      await interaction.editReply({ content: `Your ticket is ready! ${ticketChannel}` });
+      const channel = interaction.channel;
+      const messages = await channel.messages.fetch({ limit: 100 });
+      const sorted = messages.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
 
-      const ticketEmbed = new EmbedBuilder()
-        .setTitle("Support Ticket")
-        .setDescription(
-          "Thank you for contacting Support. Please do not ping support representatives within the first 24 hours."
-        )
-        .setColor(0x00ff00)
-        .setImage("https://cdn.discordapp.com/attachments/1376316945082880124/1376320097186086963/image.png");
+      const transcriptDir = path.join(__dirname, "..", "transcripts");
+      if (!fs.existsSync(transcriptDir)) {
+        fs.mkdirSync(transcriptDir, { recursive: true });
+      }
 
-      const buttons = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("ticket_close").setLabel("Close").setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId("ticket_claim").setLabel("Claim").setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId("ticket_unclaim").setLabel("Unclaim").setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId("ticket_request_management").setLabel("Request Management").setStyle(ButtonStyle.Primary)
+      const logPath = path.join(transcriptDir, `${channel.name}.txt`);
+      const zipPath = path.join(transcriptDir, `${channel.name}.zip`);
+
+      const content = sorted
+        .map(m => `[${m.createdAt.toISOString()}] ${m.author.tag}: ${m.content}`)
+        .join("\n");
+      fs.writeFileSync(logPath, content);
+
+      const output = fs.createWriteStream(zipPath);
+      const archive = archiver("zip", { zlib: { level: 9 } });
+
+      archive.pipe(output);
+      archive.file(logPath, { name: `${channel.name}.txt` });
+      await archive.finalize();
+
+      output.on("close", async () => {
+        const logChannel = await interaction.guild.channels.fetch("insert TRANSCRIPT CHANNEL");
+        await logChannel.send({
+          content: `📁 Transcript for ${channel.name}`,
+          files: [zipPath],
+        });
+
+        setTimeout(() => {
+          fs.unlinkSync(logPath);
+          fs.unlinkSync(zipPath);
+          channel.delete().catch(() => {});
+        }, 10000);
+      });
+    }
+  },
+
+  async handleModalSubmit(interaction, client) {
+    if (interaction.customId !== "ticket_modal") return;
+    const reason = interaction.fields.getTextInputValue("reason_input");
+
+    const ticketChannel = await interaction.guild.channels.create({
+      name: `ticket-${interaction.user.username}`,
+      type: ChannelType.GuildText,
+      parent: "insert ticket category ID",
+      permissionOverwrites: [
+        {
+          id: interaction.guild.roles.everyone,
+          deny: [PermissionsBitField.Flags.ViewChannel],
+        },
+        ...[
+          "replace with staff ID",
+          "replace with staff ID",
+          "replace with staff ID",
+          "replace with staff ID",
+          "replace with staff ID",
+        ].map((id) => ({
+          id,
+          allow: [PermissionsBitField.Flags.ViewChannel],
+        })),
+        {
+          id: interaction.user.id,
+          allow: [PermissionsBitField.Flags.ViewChannel],
+        },
+      ],
+    });
+
+    const embed = new EmbedBuilder()
+      .setColor(0x2f3136)
+      .setTitle("**Support Ticket - Code 3 Studios**")
+      .setDescription(
+        "Thank you for contacting the Team. We will have a Official handle this ticket in due regard.\n\nUntil then, please **DO NOT ping any support members.**"
       );
 
-      const msg = await ticketChannel.send({
-        content: `<@${user.id}> <@&${supportRoleId}>`,
-        embeds: [ticketEmbed],
-        components: [buttons],
-      });
-      await msg.pin();
-    }
+    const buttons = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("claim_ticket")
+        .setLabel("Claim")
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId("close_ticket")
+        .setLabel("Close")
+        .setStyle(ButtonStyle.Danger)
+    );
 
-    if (customId === "ticket_claim") {
-      await interaction.reply({ content: `${interaction.user} has claimed this ticket.`, ephemeral: false });
-    }
+    await ticketChannel.send({
+      content: `<@${interaction.user.id}> <@&1381773159304269914>`,
+      embeds: [embed],
+      components: [buttons],
+    });
 
-    if (customId === "ticket_unclaim") {
-      await interaction.reply({ content: `${interaction.user} has unclaimed this ticket.`, ephemeral: false });
-    }
+    await ticketChannel.send(`🔔 Ticket Creation Reason:\n\`\`\`${reason}\`\`\``);
 
-    if (customId === "ticket_request_management") {
-      await interaction.reply({ content: `<@&1376681097626390608> Assistance requested.`, ephemeral: false });
-    }
-
-    if (customId === "ticket_close") {
-      await interaction.reply({ content: "Closing ticket and sending transcript...", ephemeral: true });
-
-      const logsChannel = guild.channels.cache.get("1378242611973984367");
-      const messages = await interaction.channel.messages.fetch({ limit: 100 });
-      const content = messages
-        .filter((msg) => !msg.author.bot)
-        .map((msg) => `${msg.author.tag}: ${msg.content}`)
-        .reverse()
-        .join("\n");
-
-      const filePath = `./transcript-${interaction.channel.id}.txt`;
-      fs.writeFileSync(filePath, content);
-      await logsChannel.send({
-        content: `Transcript for ${interaction.channel.name}\nOpened by: <@${interaction.channel.topic}>\nClosed by: <@${interaction.user.id}>`,
-        files: [filePath],
-      });
-      fs.unlinkSync(filePath);
-      await interaction.channel.delete();
-    }
-  }
-});
-
-async function executeTickets(interaction) {
-  const embed = new EmbedBuilder()
-    .setTitle("Support Status")
-    .setDescription("🟢 Support is currently **online**.")
-    .setColor(0x00ff00);
-
-  const button = new ButtonBuilder()
-    .setCustomId("contact_support")
-    .setLabel("Contact Support")
-    .setStyle(ButtonStyle.Primary);
-
-  const row = new ActionRowBuilder().addComponents(button);
-  await interaction.reply({ embeds: [embed], components: [row] });
-}
-
-client.login(process.env.DISCORD_TOKEN);
+    await interaction.reply({
+      content: `🎟️ Ticket created: ${ticketChannel}`,
+      ephemeral: true,
+    });
+  },
+};
